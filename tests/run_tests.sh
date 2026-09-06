@@ -50,6 +50,26 @@ if [[ "$(uname -s)" != "Linux" ]]; then
     exit 1
 fi
 
+required_modules=(
+    "$ROOT_DIR/01_simple_char/simple_char.ko"
+    "$ROOT_DIR/02_thread_safe_char/thread_safe_char.ko"
+    "$ROOT_DIR/03_lock_free_char/lock_free_char.ko"
+)
+
+for module_path in "${required_modules[@]}"; do
+    if [[ ! -f "$module_path" ]]; then
+        echo "Missing kernel module: $module_path"
+        echo "The runtime suite requires modules built for the active target kernel."
+        echo "FydeOS/Crostini can still compile the test binaries with: make -C tests"
+        exit 2
+    fi
+done
+
+if ! command -v insmod >/dev/null 2>&1 || ! command -v rmmod >/dev/null 2>&1; then
+    echo "insmod/rmmod are required for runtime driver testing."
+    exit 2
+fi
+
 make -C "$TEST_DIR" all
 sudo -v
 unload_modules
