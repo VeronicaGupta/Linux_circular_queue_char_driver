@@ -1,5 +1,12 @@
 # Linux Character Device Driver Progression
 
+
+## FydeOS / Crostini
+
+The root Makefile is environment-aware. On FydeOS/Crostini, `make` builds the shared user application and test executables and skips kernel-module compilation when `/lib/modules/$(uname -r)/build` is unavailable.
+
+See [`README_FYDEOS.md`](README_FYDEOS.md) for the FydeOS workflow and `KDIR` override used with an externally prepared target-kernel tree.
+
 ## Purpose
 
 The repository presents three character-device implementations with the same user-space access model and progressively stronger concurrency behavior.
@@ -584,34 +591,57 @@ The circular structure would then hold message objects rather than raw bytes.
 
 # Build requirements
 
-A Linux development environment with matching kernel headers is required.
-
-Typical Debian/Ubuntu packages:
+User-space components require a C toolchain and `make`:
 
 ```bash
 sudo apt update
-sudo apt install build-essential linux-headers-$(uname -r)
+sudo apt install -y build-essential
 ```
 
-Complete repository build:
+The repository root is environment-aware. On FydeOS/Crostini, where the active kernel build tree is normally absent, the default build remains successful:
 
 ```bash
 make
 ```
 
-Individual module build examples:
+The default target always builds:
 
-```bash
-make -C 01_simple_char
-make -C 02_thread_safe_char
-make -C 03_lock_free_char
+```text
+user/char_device_demo
+tests/boundary_tests
+tests/stress_tests
 ```
 
-User-space program build:
+Kernel modules are built automatically only when `/lib/modules/$(uname -r)/build` contains a prepared kernel build tree.
+
+FydeOS-specific build and diagnostics:
 
 ```bash
-make -C user
+make fydeos
+make env
 ```
+
+A matching externally prepared kernel tree can be supplied explicitly:
+
+```bash
+make modules KDIR=/absolute/path/to/kernel-build-tree
+```
+
+Individual module builds use the same override:
+
+```bash
+make -C 01_simple_char KDIR=/absolute/path/to/kernel-build-tree
+make -C 02_thread_safe_char KDIR=/absolute/path/to/kernel-build-tree
+make -C 03_lock_free_char KDIR=/absolute/path/to/kernel-build-tree
+```
+
+On a conventional Debian/Ubuntu kernel, the matching tree is commonly installed with:
+
+```bash
+sudo apt install -y linux-headers-$(uname -r)
+```
+
+The FydeOS/Crostini kernel is not supplied by the Debian package repository, so the command above is not expected to locate headers for a FydeOS-specific kernel release. See [`README_FYDEOS.md`](README_FYDEOS.md).
 
 ---
 
