@@ -13,7 +13,6 @@
 #include <linux/string.h>
 #include <linux/uaccess.h>
 #include <linux/wait.h>
-#include <linux/version.h>
 
 #include "lock_free_char.h"
 
@@ -241,9 +240,7 @@ static const struct file_operations lock_free_fops = {
 	.read = lock_free_read,
 	.write = lock_free_write,
 	.poll = lock_free_poll,
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 12, 0)
 	.llseek = no_llseek,
-#endif
 };
 
 static struct miscdevice lock_free_misc_device = {

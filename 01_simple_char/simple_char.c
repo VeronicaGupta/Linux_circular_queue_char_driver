@@ -20,19 +20,19 @@ static struct device *simple_device;
 static char simple_buffer[SIMPLE_CHAR_CAPACITY];
 static size_t simple_data_size;
 
-static int simple_char_open(struct inode *inode, struct file *file)
+static int simple_open(struct inode *inode, struct file *file)
 {
 	pr_debug("simple_char: open\n");
 	return 0;
 }
 
-static int simple_char_release(struct inode *inode, struct file *file)
+static int simple_release(struct inode *inode, struct file *file)
 {
 	pr_debug("simple_char: release\n");
 	return 0;
 }
 
-static ssize_t simple_char_read(struct file *file, char __user *user_buffer,
+static ssize_t simple_read(struct file *file, char __user *user_buffer,
 			   size_t count, loff_t *offset)
 {
 	size_t bytes_to_read;
@@ -49,7 +49,7 @@ static ssize_t simple_char_read(struct file *file, char __user *user_buffer,
 	return bytes_to_read;
 }
 
-static ssize_t simple_char_write(struct file *file, const char __user *user_buffer,
+static ssize_t simple_write(struct file *file, const char __user *user_buffer,
 			    size_t count, loff_t *offset)
 {
 	size_t bytes_to_write;
@@ -76,10 +76,10 @@ static ssize_t simple_char_write(struct file *file, const char __user *user_buff
 
 static const struct file_operations simple_fops = {
 	.owner = THIS_MODULE,
-	.open = simple_char_open,
-	.release = simple_char_release,
-	.read = simple_char_read,
-	.write = simple_char_write,
+	.open = simple_open,
+	.release = simple_release,
+	.read = simple_read,
+	.write = simple_write,
 };
 
 static int __init simple_char_init(void)

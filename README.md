@@ -1,32 +1,48 @@
-# Linux Character Device Driver Progression
+# Linux Character Device Driver Lab — Windows + Docker + QEMU
 
+A compact learning project for Linux character-device drivers while developing on Windows. Three virtual drivers use the same Unix character-device interface but progressively change the synchronization model:
 
-## FydeOS / Crostini
+1. `simple_char` — explicit major/minor registration and a fixed kernel buffer; intentionally unsynchronized.
+2. `thread_safe_char` — bounded circular byte FIFO protected by a mutex and wait queues; supports multiple producers and consumers.
+3. `lock_free_char` — bounded SPSC circular byte FIFO using acquire/release ordering; one active reader and one active writer.
 
-The root Makefile is environment-aware. On FydeOS/Crostini, `make` builds the shared user application and test executables and skips kernel-module compilation when `/lib/modules/$(uname -r)/build` is unavailable.
+The existing driver implementations are kept unchanged. Docker and QEMU provide the Linux build/test environment around them.
 
-See [`README_FYDEOS.md`](README_FYDEOS.md) for the FydeOS workflow and `KDIR` override used with an externally prepared target-kernel tree.
+## Why Docker and QEMU are both used
 
-## Purpose
+A Docker Linux container provides GCC, Kbuild, Linux headers, BusyBox, and QEMU, but a container alone is not a separate kernel on Windows. QEMU therefore boots a stock Linux kernel that matches the installed kernel headers. The `.ko` files are built against that exact kernel and loaded inside the QEMU guest.
 
-The repository presents three character-device implementations with the same user-space access model and progressively stronger concurrency behavior.
+```text
+Windows
+  |
+  v
+Docker Desktop (Linux container)
+  |-- GCC / make / Kbuild
+  |-- Ubuntu kernel image + matching headers
+  |-- BusyBox + cpio
+  `-- QEMU
+        |
+        v
+     Linux guest kernel
+        |
+        |-- insmod simple_char.ko
+        |-- insmod thread_safe_char.ko
+        |-- insmod lock_free_char.ko
+        `-- /dev/simple_char
+            /dev/thread_safe_char
+            /dev/lock_free_char
+```
 
-- `01_simple_char` — basic character device with explicit major/minor allocation and a shared byte buffer.
-- `02_thread_safe_char` — bounded circular byte FIFO protected by a mutex and wait queues.
-- `03_lock_free_char` — bounded SPSC circular byte FIFO using ownership rules and acquire/release memory ordering.
-- `user/main.c` — common user-space program for `open()`, `read()`, and `write()` demonstrations.
-- `tests/` — deterministic boundary tests plus concurrency, reliability, and throughput stress tests.
+This follows the same development pattern as the reference project at:
 
-The progression isolates character-device mechanics from synchronization mechanics. A common system-call interface allows direct behavioral comparison across all three kernel modules.
+- https://github.com/czhao-dev/linux-device-drivers/tree/main/linux-character-device-driver
 
----
+The reference builds an out-of-tree module inside Docker, packages the module and static tests into a BusyBox initramfs, and boots a matching Linux kernel under QEMU for real `insmod`/`rmmod` testing.
 
 ## Repository layout
 
 ```text
-linux_char_devices_rewritten/
-├── Makefile
-├── README.md
+.
 ├── 01_simple_char/
 │   ├── simple_char.c
 │   ├── simple_char.h
@@ -42,754 +58,311 @@ linux_char_devices_rewritten/
 ├── user/
 │   ├── main.c
 │   └── Makefile
-└── tests/
-    ├── boundary_tests.c
-    ├── stress_tests.c
-    ├── run_tests.sh
-    ├── Makefile
-    └── README.md
+├── tests/
+│   ├── boundary_tests.c
+│   ├── stress_tests.c
+│   └── Makefile
+├── docker/
+│   ├── Dockerfile
+│   ├── lab.sh
+│   ├── init-test.sh
+│   ├── init-shell.sh
+│   ├── run.ps1
+│   ├── run.sh
+│   └── output/
+├── driver-lab.cmd
+├── Makefile
+└── README.md
 ```
 
----
+## Windows prerequisites
 
-# Character device driver
+Docker Desktop must be installed and running in **Linux container mode**. The WSL 2 backend is the normal Windows setup.
 
-A character device driver exposes kernel-controlled functionality through a file-like interface. Device nodes under `/dev` become entry points for standard file operations such as `open()`, `read()`, `write()`, and `close()`.
+Verify from PowerShell:
 
-A user-space call such as:
-
-```c
-write(fd, buffer, length);
+```powershell
+docker version
+docker run --rm hello-world
 ```
 
-passes through the system-call and VFS layers before dispatch through a driver `struct file_operations` table.
+No Windows installation of GCC, Linux headers, QEMU, or `make` is required.
+
+## One-command automated test
+
+From PowerShell at the repository root:
+
+```powershell
+.\driver-lab.cmd test
+```
+
+The launcher:
+
+1. builds the Docker image;
+2. installs/uses an Ubuntu 24.04 generic kernel and matching headers inside the image;
+3. builds all three kernel modules through Kbuild;
+4. compiles the user program and tests as static Linux executables;
+5. creates a BusyBox initramfs;
+6. boots the matching kernel with `qemu-system-x86_64`;
+7. loads the three `.ko` modules;
+8. runs boundary and stress tests;
+9. scans kernel diagnostics;
+10. unloads the modules and powers off.
+
+A successful run ends with:
 
 ```text
-User process
-    |
-    | write()
-    v
-System call layer
-    |
-    v
-Virtual File System
-    |
-    v
-struct file_operations
-    |
-    v
-Driver write callback
+DRIVER LAB RESULT: PASS
+Docker/QEMU test result: PASS
 ```
 
-Character devices are appropriate for byte-oriented or command-oriented kernel interfaces where block-storage semantics are unnecessary. Typical examples include serial ports, sensors, control channels, virtual devices, debug interfaces, and custom IPC mechanisms.
+The serial log is saved as:
 
----
+```text
+docker/output/latest.log
+```
 
-# Why a character device is useful in a Linux system
+## Build without booting QEMU
 
-Kernel code cannot be invoked as an ordinary user-space function. A controlled boundary is required between applications and privileged kernel resources.
+```powershell
+.\driver-lab.cmd build
+```
 
-A character device provides that boundary through established Linux abstractions:
+Generated artifacts are copied to:
 
-- pathname-based access through `/dev`
-- file descriptors
-- permission checks
-- VFS dispatch
-- standard `read()` and `write()` semantics
-- blocking and non-blocking behavior
-- compatibility with tools such as `cat`, `echo`, `poll`, and application runtimes
+```text
+docker/output/build/
+├── kernel-version.txt
+├── modules/
+│   ├── simple_char.ko
+│   ├── thread_safe_char.ko
+│   └── lock_free_char.ko
+└── bin/
+    ├── char_device_demo
+    ├── boundary_tests
+    └── stress_tests
+```
 
-The same user-space API can therefore remain stable while internal driver architecture changes.
+The `.ko` files are for the QEMU guest kernel, not the Windows/WSL host kernel.
 
----
+## Interactive learning mode
 
-# 01 — Basic character device
+The most useful mode while learning is:
 
-## Design
+```powershell
+.\driver-lab.cmd shell
+```
 
-The basic implementation demonstrates explicit character-device registration.
+QEMU boots to a BusyBox shell. No module is loaded automatically, allowing the complete driver lifecycle to be practiced manually.
+
+### Simple character driver
+
+```sh
+uname -a
+ls /modules
+
+insmod /modules/simple_char.ko
+lsmod
+ls -l /dev/simple_char
+cat /proc/devices
+
+/bin/char_device_demo simple roundtrip HELLO
+/bin/boundary_tests simple
+
+dmesg | tail -30
+rmmod simple_char
+```
+
+Concepts visible in this stage:
 
 ```text
 alloc_chrdev_region()
-        |
-        v
-major + minor number
-        |
-        v
-cdev_init()
-        |
-        v
-cdev_add()
-        |
-        v
-class_create()
-        |
-        v
-device_create()
-        |
-        v
+       |
+       v
+major/minor device number
+       |
+       v
+cdev_init() + cdev_add()
+       |
+       v
+class_create() + device_create()
+       |
+       v
 /dev/simple_char
+       |
+       v
+file_operations -> open/read/write/release
 ```
 
-A fixed 1024-byte kernel buffer stores data. File position controls read and write offsets. `copy_from_user()` transfers bytes into kernel memory. `copy_to_user()` transfers bytes back into user memory.
+### Thread-safe circular character driver
 
-### Major number
+```sh
+insmod /modules/thread_safe_char.ko
 
-The major number identifies the driver associated with a device number.
+/bin/char_device_demo safe read 5 &
+/bin/char_device_demo safe write HELLO
+wait
 
-### Minor number
+/bin/boundary_tests safe
+/bin/stress_tests stream safe 8 1024
+/bin/stress_tests mpmc 4 4 10000
 
-The minor number identifies a device instance managed by the same driver.
+rmmod thread_safe_char
+```
 
-Only minor `0` is required for the basic implementation.
-
-## Concurrency properties
-
-No synchronization primitive protects the shared buffer or `simple_data_size`.
-
-Concurrent access can therefore produce races such as:
+The blocking experiment shows the reader sleeping on a wait queue until the writer deposits data.
 
 ```text
-Writer A reads shared state
-Writer B reads same shared state
-Writer A changes buffer contents
-Writer B changes overlapping contents
-Final state depends on execution timing
-```
-
-The absence of synchronization is intentional. Character-device registration and user/kernel data transfer remain visible without concurrency code obscuring the basic path.
-
-## Trade-offs
-
-Advantages:
-
-- minimal driver structure
-- explicit major/minor registration
-- direct visibility into `cdev` registration
-- small code surface
-
-Disadvantages:
-
-- unsafe shared state under concurrent access
-- no bounded producer-consumer semantics
-- no blocking behavior
-- no queue ordering between independent writes and reads
-
-Suitable use:
-
-- character-driver fundamentals
-- VFS callback tracing
-- major/minor registration study
-- controlled single-process experiments
-
----
-
-# Why a circular queue becomes useful
-
-A single shared buffer has poor behavior when producers and consumers operate at different rates.
-
-A producer can generate data before a consumer becomes ready. Direct replacement of the buffer can destroy unread data. A circular queue allows already allocated storage to be reused continuously while preserving FIFO ordering.
-
-```text
-capacity = 8
-
-        read_index
-            v
-+---+---+---+---+---+---+---+---+
-| D | E |   |   |   | A | B | C |
-+---+---+---+---+---+---+---+---+
-                ^
-            write_index
-```
-
-Wrap-around avoids shifting data after every read. Queue operations remain constant-time aside from byte copying.
-
-A bounded queue also introduces explicit backpressure. A full queue prevents unlimited kernel-memory growth, while an empty queue allows a consumer to sleep rather than spin.
-
----
-
-# 02 — Thread-safe circular character device
-
-## Queue state
-
-The thread-safe driver maintains:
-
-```c
-buffer
-capacity
-read_index
-write_index
-data_count
-```
-
-`read_index` identifies the next byte available for consumption. `write_index` identifies the next free location for production. `data_count` distinguishes full and empty states directly.
-
-## Synchronization problem
-
-Several shared variables must change as one logical transaction.
-
-A write operation requires:
-
-```text
-check free space
-copy bytes into ring
-advance write_index
-increase data_count
-```
-
-A read operation requires:
-
-```text
-check available data
-copy bytes from ring
-advance read_index
-decrease data_count
-```
-
-Interleaving without protection can break queue invariants.
-
-Example:
-
-```text
-Initial data_count = 10
-
-Reader A loads data_count = 10
-Reader B loads data_count = 10
-Reader A removes 8 bytes
-Reader B removes 8 bytes using stale state
-Queue metadata becomes inconsistent
-```
-
-## Mutex strategy
-
-`struct mutex` protects the complete queue state.
-
-```text
-mutex_lock_interruptible()
-        |
-        v
-inspect queue state
-        |
-        v
-copy data
-        |
-        v
-update indexes and count
-        |
-        v
-mutex_unlock()
-```
-
-A mutex is appropriate because `read()` and `write()` callbacks execute in process context and sleeping operations can occur. A spinlock would waste CPU while contended and would impose stricter rules around sleeping code.
-
-## Wait-queue strategy
-
-Two wait queues provide blocking producer-consumer behavior.
-
-```text
-read_wait   -> reader sleeps while queue is empty
-write_wait  -> writer sleeps while queue is full
-```
-
-Empty queue behavior:
-
-```text
-read()
+reader                         writer
+  |                              |
+read()                         write()
+  |                              |
+queue empty                      |
+  |                              |
+wait_event_interruptible()       |
+  |                              |
+  |                         mutex_lock()
+  |                         enqueue bytes
+  |                         mutex_unlock()
+  |                              |
+  |<--- wake_up_interruptible()--|
   |
-  v
-queue empty
-  |
-  v
-release mutex
-  |
-  v
-wait_event_interruptible(read_wait, data_count > 0)
-  |
-  v
-writer stores data
-  |
-  v
-wake_up_interruptible(read_wait)
+consume bytes
 ```
 
-Full queue behavior follows the symmetric path through `write_wait`.
+### Lock-free SPSC circular character driver
 
-A `while` loop surrounds each blocking condition because a wakeup does not reserve queue state. Another runnable thread can consume newly available data before a previously sleeping thread reacquires the mutex.
+```sh
+insmod /modules/lock_free_char.ko
 
-## Non-blocking behavior
+/bin/char_device_demo lockfree read 5 &
+/bin/char_device_demo lockfree write HELLO
+wait
 
-`O_NONBLOCK` changes queue-full and queue-empty behavior.
+/bin/boundary_tests lockfree
+/bin/stress_tests stream lockfree 8 1024
+
+rmmod lock_free_char
+```
+
+The queue synchronization model changes to ownership rather than a mutex:
 
 ```text
-empty read  -> -EAGAIN
-full write  -> -EAGAIN
+single reader                    single writer
+     |                                |
+owns read_index                 owns write_index
+     |                                |
+     `------- acquire/release --------'
 ```
 
-No sleeping occurs for those cases.
+`volatile` is not used as a synchronization mechanism. The published ring indices use kernel memory-ordering primitives so buffer accesses happen before/after index publication as required.
 
-## User-memory transfer strategy
+## Automated tests
 
-A temporary kernel buffer is used for each transfer.
+### Boundary tests
 
-Read path:
-
-```text
-ring -> temporary kernel buffer -> copy_to_user()
+```sh
+/bin/boundary_tests all
 ```
 
-Write path:
+Coverage includes:
 
-```text
-copy_from_user() -> temporary kernel buffer -> ring
+- zero-length read/write;
+- exact-capacity transfer;
+- oversized transfer;
+- EOF behavior for the simple device;
+- `EAGAIN` on empty/full non-blocking FIFO operations;
+- circular-buffer wrap-around and FIFO ordering;
+- `EBUSY` for a second reader or writer on the SPSC lock-free driver.
+
+### SPSC stream stress
+
+```sh
+/bin/stress_tests stream safe 8 1024
+/bin/stress_tests stream lockfree 8 1024
 ```
 
-Queue indexes are committed only after a successful user-memory transfer. Failed user copies therefore avoid partially committed queue metadata.
+Pass criteria:
 
-## Trade-offs
+- requested bytes written exactly;
+- requested bytes read exactly;
+- zero data mismatches;
+- zero unexpected errors;
+- 100% verified reliability.
 
-Advantages:
+Metrics printed include elapsed time, MiB/s, syscall counts, short reads/writes, and context switches.
 
-- multiple readers supported
-- multiple writers supported
-- simple correctness model
-- blocking backpressure
-- straightforward invariant validation
+QEMU/TCG timing should be treated as a controlled comparative experiment, not native-hardware throughput.
 
-Disadvantages:
+### MPMC reliability
 
-- mutex contention under heavy concurrency
-- serialization of queue operations
-- user-copy latency can extend mutex hold time
-- temporary allocation adds allocation and copy overhead
-
-Suitable use:
-
-- general multi-threaded producer-consumer access
-- correctness-oriented driver implementations
-- moderate throughput requirements
-- simple maintainable synchronization
-
----
-
-# 03 — SPSC lock-free circular character device
-
-## Concurrency contract
-
-The lock-free queue supports exactly:
-
-```text
-one active reader
-one active writer
+```sh
+/bin/stress_tests mpmc 4 4 10000
 ```
 
-Multiple readers or multiple writers are rejected with `-EBUSY` during `open()`.
+This is intended for `thread_safe_char`. Multiple producers and consumers concurrently exercise the shared mutex-protected FIFO.
 
-The restriction converts shared queue state into single-writer ownership:
+### Unsynchronized race observation
 
-```text
-reader owns read_index
-writer owns write_index
+```sh
+/bin/stress_tests simple-race 4 10
 ```
 
-No mutex or spinlock protects ring indexes during normal queue operations.
+`simple_char` intentionally has no synchronization. The test observes concurrent overlapping writers rather than claiming thread safety.
 
-## Full and empty detection
+## Driver trade-offs
 
-An extra internal slot removes the need for a shared `data_count` variable.
-
-For a usable capacity of 4096 bytes:
-
-```text
-allocated ring size = 4097 bytes
-```
-
-Empty state:
-
-```text
-read_index == write_index
-```
-
-Full state:
-
-```text
-used bytes == 4096
-```
-
-The extra slot eliminates ambiguity between full and empty conditions.
-
-## Memory-ordering strategy
-
-Lock removal does not remove ordering requirements.
-
-Producer sequence:
-
-```text
-observe read_index with acquire ordering
-        |
-        v
-copy new bytes into ring
-        |
-        v
-publish write_index with release ordering
-```
-
-Consumer sequence:
-
-```text
-observe write_index with acquire ordering
-        |
-        v
-copy available bytes from ring
-        |
-        v
-publish read_index with release ordering
-```
-
-Relevant APIs:
-
-```c
-smp_load_acquire()
-smp_store_release()
-READ_ONCE()
-```
-
-Release publication prevents index visibility from preceding completion of associated buffer writes. Acquire observation prevents subsequent buffer reads from moving before observation of the published index.
-
-`volatile` is not a replacement for this ordering model. Compiler-access visibility and inter-CPU memory ordering represent different concerns.
-
-## Wait queues in a lock-free queue
-
-Queue-state synchronization remains lock-free, while blocking system calls can still sleep.
-
-```text
-empty reader -> wait_event_interruptible()
-full writer  -> wait_event_interruptible()
-```
-
-Wait queues can contain internal kernel synchronization. The description "lock-free" therefore applies to ring-state coordination between the single producer and single consumer, not to every instruction executed by the complete system-call path.
-
-## Open admission
-
-Atomic variables protect the SPSC access contract.
-
-```text
-reader_open: 0 -> 1
-writer_open: 0 -> 1
-```
-
-`atomic_cmpxchg()` reserves each role. Queue data movement remains independent of those admission atomics.
-
-## Trade-offs
-
-Advantages:
-
-- no queue mutex on the data path
-- producer and consumer can progress concurrently
-- reduced lock contention
-- small synchronization state
-- useful introduction to kernel memory ordering
-
-Disadvantages:
-
-- exactly one reader and one writer
-- substantially stricter correctness assumptions
-- harder review and debugging
-- memory-ordering mistakes can create architecture-dependent failures
-- no direct extension to MPMC operation without a different algorithm
-- blocking wait queues mean the full driver is not wait-free
-
-Suitable use:
-
-- SPSC streaming paths
-- deterministic producer-consumer ownership
-- low-contention data transfer
-- memory-ordering study
-
----
-
-# Synchronization comparison
-
-| Property | Basic | Thread-safe | Lock-free SPSC |
+| Implementation | Concurrency | Main advantage | Main cost / restriction |
 |---|---|---|---|
-| Shared buffer | Yes | Circular FIFO | Circular FIFO |
-| Multiple readers | Unsafe | Supported | Rejected |
-| Multiple writers | Unsafe | Supported | Rejected |
-| Mutex | No | Yes | No queue mutex |
-| Wait queues | No | Yes | Yes |
-| Blocking empty read | EOF-style result | Yes | Yes |
-| Blocking full write | No | Yes | Yes |
-| `O_NONBLOCK` queue handling | Not applicable | `-EAGAIN` | `-EAGAIN` |
-| Memory ordering | No explicit concurrency contract | Provided by mutex | Acquire/release |
-| Complexity | Low | Medium | Higher |
-| Primary objective | Driver mechanics | General correctness | SPSC low-contention path |
+| `simple_char` | Unsupported | Minimal character-driver plumbing | Shared state races under concurrent access |
+| `thread_safe_char` | MPMC | Straightforward correctness and blocking semantics | Mutex serialization and contention |
+| `lock_free_char` | SPSC | Producer and consumer do not serialize on one queue mutex | Exactly one reader and one writer; memory ordering is harder to reason about |
 
----
+The lock-free design should not be described merely as “faster.” Its principal trade-off is reduced synchronization contention in exchange for a much narrower concurrency contract and more subtle correctness requirements.
 
-# Design problems and API responses
+## Useful launcher commands
 
-| Problem | Consequence | Strategy | Kernel API / mechanism |
-|---|---|---|---|
-| Concurrent queue mutation | corrupted indexes or lost bytes | serialize complete state update | `mutex_lock_interruptible()` |
-| Empty queue | CPU waste from polling | block consumer | `wait_event_interruptible()` |
-| Full queue | unbounded growth or data overwrite | bounded backpressure | `wait_event_interruptible()` |
-| State change after sleep | sleeping task remains blocked | wake relevant waiters | `wake_up_interruptible()` |
-| Interrupted blocking call | unresponsive signal handling | abort syscall | `-ERESTARTSYS` |
-| Non-blocking empty/full state | unwanted sleeping | immediate retry status | `-EAGAIN` |
-| Invalid user pointer | kernel fault risk | guarded user access | `copy_to_user()`, `memdup_user()` |
-| Ring wrap-around | out-of-range linear copy | split copy at ring boundary | two `memcpy()` segments |
-| SPSC publication ordering | stale or premature data visibility | release/acquire synchronization | `smp_store_release()`, `smp_load_acquire()` |
-| Multiple SPSC role owners | index write/write race | admission restriction | `atomic_cmpxchg()` |
-
----
-
-# Why `volatile` does not solve synchronization
-
-`volatile` constrains selected compiler optimizations around accesses. No mutual exclusion is created. No producer/consumer ownership is created. No complete cross-CPU publication protocol is created.
-
-Thread-safe design requirements are satisfied with a mutex because several state variables form one protected invariant.
-
-SPSC lock-free design requirements are satisfied with exclusive index ownership plus acquire/release ordering.
-
----
-
-# Mutex versus lock-free design
-
-A mutex-based implementation should generally be preferred when multiple producers or multiple consumers are required and measured contention remains acceptable. The correctness argument remains compact and maintainable.
-
-A lock-free implementation becomes attractive when ownership can be constrained naturally and contention or latency measurements justify added complexity. Lock removal without a strict ownership model provides no correctness benefit.
-
-Performance should be evaluated with measured workload behavior rather than inferred from the word "lock-free". Cache-line movement, system-call cost, copying, allocation, scheduling, and wakeup overhead can dominate lock cost.
-
----
-
-# Byte stream versus message queue
-
-Both circular implementations provide byte-stream FIFO semantics.
-
-Example:
-
-```text
-write("ABC")
-write("DEF")
-read(6) -> "ABCDEF"
+```powershell
+.\driver-lab.cmd image   # build only the Docker image
+.\driver-lab.cmd build   # compile modules and static tools
+.\driver-lab.cmd test    # full automated QEMU run
+.\driver-lab.cmd shell   # interactive QEMU learning shell
+.\driver-lab.cmd clean   # clear docker/output artifacts
 ```
 
-Write boundaries are not retained. A true message queue requires explicit message metadata such as a length field or fixed-size message slots.
+PowerShell can also invoke the launcher directly:
 
-A message-preserving design could use:
-
-```c
-struct message {
-    size_t length;
-    char data[MAX_MESSAGE_SIZE];
-};
+```powershell
+.\docker\run.ps1 test
 ```
 
-The circular structure would then hold message objects rather than raw bytes.
+Git Bash/WSL users can use:
 
----
-
-# Build requirements
-
-User-space components require a C toolchain and `make`:
-
-```bash
-sudo apt update
-sudo apt install -y build-essential
+```sh
+./docker/run.sh test
 ```
 
-The repository root is environment-aware. On FydeOS/Crostini, where the active kernel build tree is normally absent, the default build remains successful:
+## Kernel module build model
 
-```bash
-make
+Each driver retains the standard external-module Kbuild pattern:
+
+```make
+obj-m += simple_char.o
+
+all:
+	$(MAKE) -C "$(KDIR)" M="$(CURDIR)" modules
 ```
 
-The default target always builds:
+The Docker harness sets `KDIR` to the headers belonging to the same kernel image that QEMU later boots. This avoids the common module-version mismatch caused by building against one kernel and loading into another.
 
-```text
-user/char_device_demo
-tests/boundary_tests
-tests/stress_tests
-```
+Official Kbuild documentation:
 
-Kernel modules are built automatically only when `/lib/modules/$(uname -r)/build` contains a prepared kernel build tree.
+- https://docs.kernel.org/next/kbuild/modules.html
 
-FydeOS-specific build and diagnostics:
+## Reference project
 
-```bash
-make fydeos
-make env
-```
+The Docker/QEMU structure is based on the testing pattern demonstrated by:
 
-A matching externally prepared kernel tree can be supplied explicitly:
+- https://github.com/czhao-dev/linux-device-drivers/tree/main/linux-character-device-driver
 
-```bash
-make modules KDIR=/absolute/path/to/kernel-build-tree
-```
-
-Individual module builds use the same override:
-
-```bash
-make -C 01_simple_char KDIR=/absolute/path/to/kernel-build-tree
-make -C 02_thread_safe_char KDIR=/absolute/path/to/kernel-build-tree
-make -C 03_lock_free_char KDIR=/absolute/path/to/kernel-build-tree
-```
-
-On a conventional Debian/Ubuntu kernel, the matching tree is commonly installed with:
-
-```bash
-sudo apt install -y linux-headers-$(uname -r)
-```
-
-The FydeOS/Crostini kernel is not supplied by the Debian package repository, so the command above is not expected to locate headers for a FydeOS-specific kernel release. See [`README_FYDEOS.md`](README_FYDEOS.md).
-
----
-
-# Module loading
-
-Only the driver under evaluation needs to be loaded.
-
-Basic driver:
-
-```bash
-sudo insmod 01_simple_char/simple_char.ko
-ls -l /dev/simple_char
-```
-
-Thread-safe driver:
-
-```bash
-sudo insmod 02_thread_safe_char/thread_safe_char.ko
-ls -l /dev/thread_safe_char
-```
-
-Lock-free driver:
-
-```bash
-sudo insmod 03_lock_free_char/lock_free_char.ko
-ls -l /dev/lock_free_char
-```
-
-Kernel messages:
-
-```bash
-dmesg | tail -n 30
-```
-
-Unload commands:
-
-```bash
-sudo rmmod simple_char
-sudo rmmod thread_safe_char
-sudo rmmod lock_free_char
-```
-
----
-
-# Shared user-space program
-
-The same `main.c` executable accesses all three devices.
-
-Build:
-
-```bash
-make -C user
-```
-
-Basic driver examples:
-
-```bash
-./user/char_device_demo simple write "hello"
-./user/char_device_demo simple read 32
-./user/char_device_demo simple roundtrip "hello"
-```
-
-Thread-safe driver examples:
-
-```bash
-./user/char_device_demo safe write "hello"
-./user/char_device_demo safe read 32
-./user/char_device_demo safe roundtrip "hello"
-```
-
-Lock-free driver examples:
-
-```bash
-./user/char_device_demo lockfree write "hello"
-./user/char_device_demo lockfree read 32
-./user/char_device_demo lockfree roundtrip "hello"
-```
-
-An empty read on either circular FIFO blocks until data becomes available. A full circular FIFO blocks a writer until space becomes available.
-
----
-
-# Suggested validation
-
-Basic character device validation:
-
-```text
-load module
-confirm /dev/simple_char
-write known bytes
-read known bytes
-compare result
-inspect dmesg
-unload module
-```
-
-Thread-safe validation:
-
-```text
-start multiple producers
-start multiple consumers
-verify FIFO data integrity
-exercise empty-reader blocking
-exercise full-writer blocking
-exercise signal interruption
-exercise non-blocking mode
-```
-
-Lock-free validation:
-
-```text
-start one producer
-start one consumer
-verify sustained FIFO integrity
-attempt second reader and expect EBUSY
-attempt second writer and expect EBUSY
-exercise ring wrap-around repeatedly
-exercise empty/full blocking
-```
-
-Kernel debugging facilities such as KASAN, KCSAN, lockdep, and dynamic debug can provide additional validation during development.
-
----
-
-# Engineering summary
-
-The basic character device establishes the Linux driver interface. The mutex-based circular device adds a general bounded producer-consumer model. The SPSC lock-free circular device replaces shared-state serialization with ownership and memory-ordering constraints.
-
-The three designs demonstrate an important systems principle: synchronization strategy follows the concurrency contract. General multi-reader/multi-writer requirements favor simple protected invariants. Strict single-producer/single-consumer ownership permits a smaller lock-free state machine. Increased concurrency performance therefore carries increased assumptions, testing requirements, and maintenance cost.
-
----
-
-# Testing and measurable comparison
-
-The `tests/` directory separates deterministic API validation from sustained concurrency tests. Boundary checks cover capacity edges, empty/full behavior, wrap-around, `EAGAIN`, `ENOSPC`, EOF, and the SPSC `EBUSY` ownership rule.
-
-Stress tests record byte counts, corruption mismatches, syscall counts, short I/O, `EAGAIN` retries, elapsed time, throughput, and scheduler context switches. The thread-safe implementation receives an additional MPMC reliability test. The lock-free implementation receives SPSC stream validation and endpoint-admission validation. The basic implementation receives a concurrent-write observation that demonstrates the absence of a synchronization guarantee.
-
-Build test executables with:
-
-```bash
-make tests
-```
-
-Run the complete module-by-module Linux test sequence with:
-
-```bash
-make test
-```
-
-Detailed test rationale and pass criteria are documented in [`tests/README.md`](tests/README.md).
+The source code in the three driver folders remains the existing project implementation; only the surrounding Windows Docker/QEMU workflow is added.
