@@ -12,6 +12,7 @@
 #include <linux/string.h>
 #include <linux/uaccess.h>
 #include <linux/wait.h>
+#include <linux/version.h>
 
 #include "thread_safe_char.h"
 
@@ -177,7 +178,9 @@ static const struct file_operations thread_safe_fops = {
 	.open = thread_safe_open,
 	.read = thread_safe_read,
 	.write = thread_safe_write,
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 12, 0)
 	.llseek = no_llseek,
+#endif
 };
 
 static struct miscdevice thread_safe_misc_device = {

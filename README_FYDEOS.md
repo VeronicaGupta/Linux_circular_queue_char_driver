@@ -250,3 +250,15 @@ make modules KDIR=/path/to/kernel-tree
 # Remove all local artifacts even without kernel headers
 make clean
 ```
+
+## Compile-checking against installed Debian headers
+
+When a Debian header tree is present under `/lib/modules/<version>/build`, the driver sources can be compile-checked against that kernel API even when it does not match the running FydeOS kernel. For example:
+
+```bash
+make modules KDIR=/lib/modules/6.1.0-52-amd64/build
+```
+
+A successful build verifies source compatibility with that header tree only. The resulting `.ko` files must not be loaded into a different running kernel such as `6.6.76-08111-g8df27f55632a`.
+
+Driver callbacks use project-specific prefixes such as `simple_char_open()` rather than generic kernel names such as `simple_open()`, preventing collisions with helpers already declared by Linux headers.
