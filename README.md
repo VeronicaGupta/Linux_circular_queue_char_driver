@@ -1,6 +1,6 @@
 # Linux Character Device Driver Lab
 
-A Linux kernel learning project that implements the same character-device interface using three synchronization designs: an unsynchronized baseline, a mutex/wait-queue circular FIFO, and a lock-free SPSC circular FIFO. The drivers are built and exercised in a reproducible Docker + QEMU Linux environment, with execution evidence retained under [`aws_linux_results/`](aws_linux_results/).
+A Linux kernel learning project that implements the same character-device interface using three synchronization designs: an unsynchronized baseline, a mutex/wait-queue circular FIFO, and a lock-free SPSC circular FIFO. The drivers are built and exercised in a reproducible Docker + QEMU Linux environment, with implementation under [`aws_linux_results/`](aws_linux_results/).
 
 ## Results at a glance
 
@@ -22,7 +22,7 @@ The recorded lock-free run achieved approximately **14.2% higher SPSC throughput
 
 The mutex implementation was also validated under **4 producers + 4 consumers**, consuming the expected **40,000 / 40,000 bytes** without loss. The lock-free implementation instead enforces its narrower SPSC contract by rejecting additional readers or writers with `-EBUSY`.
 
-### Execution evidence
+### Execution
 
 **Docker/QEMU build environment**
 
@@ -36,7 +36,7 @@ The mutex implementation was also validated under **4 producers + 4 consumers**,
 
 <img src="aws_linux_results/screenshot/Screenshot%202026-09-06%20231229.png" alt="Lock-free character driver benchmark and boundary test execution" width="100%">
 
-Detailed evidence:
+Detailed logs:
 
 - [`safe.log`](aws_linux_results/safe.log) — mutex boundary, SPSC, and MPMC results
 - [`lockfree.log`](aws_linux_results/lockfree.log) — lock-free boundary and SPSC results
