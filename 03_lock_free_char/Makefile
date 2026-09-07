@@ -1,32 +1,8 @@
-SHELL := /bin/bash
-
 obj-m += lock_free_char.o
-
 KDIR ?= /lib/modules/$(shell uname -r)/build
-MODULE_DIR := $(CURDIR)
-
-.PHONY: all check-kdir clean info
-
-all: check-kdir
-	$(MAKE) -C "$(KDIR)" M="$(MODULE_DIR)" modules
-
-check-kdir:
-	@if [[ ! -f "$(KDIR)/Makefile" ]]; then \
-		echo "ERROR: kernel build tree not found: $(KDIR)"; \
-		echo "Provide the exact prepared target-kernel tree:"; \
-		echo "  make KDIR=/absolute/path/to/kernel-build-tree"; \
-		exit 2; \
-	fi
-
-info:
-	@echo "Module: lock_free_char.ko"
-	@echo "Kernel: $(shell uname -r)"
-	@echo "KDIR:   $(KDIR)"
-
+PWD := $(CURDIR)
+.PHONY: all clean
+all:
+	$(MAKE) -C "$(KDIR)" M="$(PWD)" modules
 clean:
-	@if [[ -f "$(KDIR)/Makefile" ]]; then \
-		$(MAKE) -C "$(KDIR)" M="$(MODULE_DIR)" clean; \
-	else \
-		rm -rf *.o *.ko *.mod *.mod.c .*.cmd Module.symvers modules.order \
-		       .tmp_versions .cache.mk; \
-	fi
+	@if [ -d "$(KDIR)" ]; then $(MAKE) -C "$(KDIR)" M="$(PWD)" clean; else rm -f *.o *.ko *.mod *.mod.c *.symvers modules.order Module.symvers .*.cmd; rm -rf .tmp_versions; fi

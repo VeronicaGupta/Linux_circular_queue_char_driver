@@ -1,69 +1,30 @@
 param(
-    [ValidateSet("build", "test", "shell", "clean", "image")]
-    [string]$Command = "test"
+    [ValidateSet("image", "build", "test", "shell", "clean", "help")]
+    [string]$Command = "help"
 )
 
 $ErrorActionPreference = "Stop"
-$ImageName = "linux-character-driver-lab:ubuntu24"
-$ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$Dockerfile = Join-Path $PSScriptRoot "Dockerfile"
-
-function Invoke-DockerChecked {
-    param([string[]]$Arguments)
-
-    & docker @Arguments
-    if ($LASTEXITCODE -ne 0) {
-        throw "Docker command failed with exit code $LASTEXITCODE"
-    }
-}
-
-if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
-    Write-Error "docker.exe is not on PATH. Install/start Docker Desktop first."
-    exit 1
-}
-
-& docker info *> $null
-if ($LASTEXITCODE -ne 0) {
-    Write-Error "Docker Desktop is installed but the Linux Docker engine is not running."
-    exit 1
-}
-
-if ($Command -eq "clean") {
-    $OutputDirectory = Join-Path $PSScriptRoot "output"
-    if (Test-Path $OutputDirectory) {
-        Get-ChildItem $OutputDirectory -Force |
-            Where-Object { $_.Name -ne ".gitkeep" } |
-            Remove-Item -Recurse -Force
-    }
-    Write-Host "Local Docker/QEMU output cleaned."
-    exit 0
-}
-
-Write-Host "Building Docker image $ImageName"
-Invoke-DockerChecked @(
-    "build",
-    "--platform", "linux/amd64",
-    "-t", $ImageName,
-    "-f", $Dockerfile,
-    $ProjectRoot
-)
+$Root = Split-Path -Parent $PSScriptRoot
+$Image = "char-driver-lab"
+Set-Location $Root
 
 if ($Command -eq "image") {
-    Write-Host "Docker image ready: $ImageName"
-    exit 0
+    docker build -t $Image -f docker/Dockerfile .
+    exit $LASTEXITCODE
 }
 
-$MountSpec = "type=bind,source=$ProjectRoot,target=/src"
-$RunArguments = @(
-    "run", "--rm",
-    "--platform", "linux/amd64",
-    "--mount", $MountSpec,
-    "-w", "/src"
-)
+$exists = docker image inspect $Image 2>$null
+if ($LASTEXITCODE -ne 0) {
+    docker build -t $Image -f docker/Dockerfile .
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+}
+
+New-Item -ItemType Directory -Force -Path "docker/output" | Out-Null
+$Output = (Resolve-Path "docker/output").Path
 
 if ($Command -eq "shell") {
-    $RunArguments += @("-it")
+    docker run --rm -it -v "${Output}:/workspace/docker/output" $Image shell
+} else {
+    docker run --rm -v "${Output}:/workspace/docker/output" $Image $Command
 }
-
-$RunArguments += @($ImageName, "bash", "/src/docker/lab.sh", $Command)
-Invoke-DockerChecked $RunArguments
+exit $LASTEXITCODE

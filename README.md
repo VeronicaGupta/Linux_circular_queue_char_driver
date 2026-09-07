@@ -1,45 +1,181 @@
-# Linux Character Device Driver Lab — Windows + Docker + QEMU
+# Linux Character Device Driver Lab
 
-A compact learning project for Linux character-device drivers while developing on Windows. Three virtual drivers use the same Unix character-device interface but progressively change the synchronization model:
+A compact learning project containing three Linux character drivers that expose the same user-space file API while using different synchronization designs.
 
-1. `simple_char` — explicit major/minor registration and a fixed kernel buffer; intentionally unsynchronized.
-2. `thread_safe_char` — bounded circular byte FIFO protected by a mutex and wait queues; supports multiple producers and consumers.
-3. `lock_free_char` — bounded SPSC circular byte FIFO using acquire/release ordering; one active reader and one active writer.
+## Drivers
 
-The existing driver implementations are kept unchanged. Docker and QEMU provide the Linux build/test environment around them.
+| Driver | Device node | Design | Intended concurrency |
+|---|---|---|---|
+| `simple_char` | `/dev/simple_char` | Fixed byte buffer, explicit major/minor + `cdev` | Educational only; no synchronization |
+| `thread_safe_char` | `/dev/thread_safe_char` | Circular byte FIFO, mutex + wait queues | Multiple producers / multiple consumers |
+| `lock_free_char` | `/dev/lock_free_char` | Circular byte FIFO, acquire/release index publication | Single producer / single consumer |
 
-## Why Docker and QEMU are both used
+The queue drivers are byte-stream FIFOs. Individual `write()` calls are not preserved as message boundaries.
 
-A Docker Linux container provides GCC, Kbuild, Linux headers, BusyBox, and QEMU, but a container alone is not a separate kernel on Windows. QEMU therefore boots a stock Linux kernel that matches the installed kernel headers. The `.ko` files are built against that exact kernel and loaded inside the QEMU guest.
+## Why three versions
 
-```text
-Windows
-  |
-  v
-Docker Desktop (Linux container)
-  |-- GCC / make / Kbuild
-  |-- Ubuntu kernel image + matching headers
-  |-- BusyBox + cpio
-  `-- QEMU
-        |
-        v
-     Linux guest kernel
-        |
-        |-- insmod simple_char.ko
-        |-- insmod thread_safe_char.ko
-        |-- insmod lock_free_char.ko
-        `-- /dev/simple_char
-            /dev/thread_safe_char
-            /dev/lock_free_char
+The simple driver isolates the Linux character-device plumbing: device-number allocation, `cdev`, `class_create()`, `device_create()`, `file_operations`, and user/kernel copies. It deliberately omits synchronization so that registration and syscall dispatch remain visible.
+
+The thread-safe driver adds a bounded circular FIFO. A mutex protects the shared read index, write index, occupancy, and buffer mutation. Wait queues block readers when the FIFO is empty and writers when it is full. `O_NONBLOCK` converts those waits into `-EAGAIN`.
+
+The lock-free version removes the FIFO mutex by narrowing the contract to SPSC. The reader exclusively publishes `read_index`; the writer exclusively publishes `write_index`. `smp_store_release()` publishes completed buffer updates and `smp_load_acquire()` observes them in the required order. Extra readers or writers are rejected with `-EBUSY`.
+
+## Trade-offs
+
+The unsynchronized implementation has the smallest code path but cannot guarantee correct concurrent access. The mutex design is straightforward and supports MPMC use, but lock contention and scheduler wakeups can increase latency under load. The SPSC lock-free design allows one producer and one consumer to progress without a queue lock, but requires strict ownership, explicit memory ordering, and rejects broader concurrency.
+
+Lock-free should not be assumed to be faster in every workload. Small transfers emphasize synchronization and syscall overhead; large transfers increasingly emphasize `copy_to_user()`/`copy_from_user()` and memory movement. Benchmark results should be interpreted under identical workloads.
+
+# Docker + QEMU workflow
+
+The Docker image contains Ubuntu kernel headers, the matching kernel image, GCC/Kbuild, BusyBox, and QEMU. The three modules are built against that kernel, packaged with static test binaries into an initramfs, and loaded inside a QEMU Linux guest.
+
+Docker provides the reproducible build environment. QEMU provides the actual Linux kernel under test. A normal container alone is insufficient for portable kernel-module testing because containers share the host kernel.
+
+## Build the Docker image
+
+```bash
+docker build -t char-driver-lab -f docker/Dockerfile .
 ```
 
-This follows the same development pattern as the reference project at:
+## Automated build and test
 
-- https://github.com/czhao-dev/linux-device-drivers/tree/main/linux-character-device-driver
+```bash
+docker run --rm char-driver-lab test
+```
 
-The reference builds an out-of-tree module inside Docker, packages the module and static tests into a BusyBox initramfs, and boots a matching Linux kernel under QEMU for real `insmod`/`rmmod` testing.
+The automated guest performs:
 
-## Repository layout
+- module insertion and removal;
+- `/dev` node verification;
+- basic `open/read/write` exercises;
+- boundary tests;
+- SPSC integrity/throughput tests for mutex and lock-free drivers;
+- MPMC reliability testing for the mutex driver;
+- kernel-log inspection.
+
+A successful run ends with:
+
+```text
+DRIVER LAB RESULT: PASS
+Docker/QEMU test result: PASS
+```
+
+## Interactive learning shell
+
+```bash
+docker run --rm -it char-driver-lab shell
+```
+
+Inside the QEMU guest:
+
+```sh
+uname -a
+ls /modules
+
+insmod /modules/simple_char.ko
+lsmod
+ls -l /dev/simple_char
+cat /proc/devices
+/bin/char_device_demo simple roundtrip HELLO
+/bin/boundary_tests simple
+dmesg | tail -30
+rmmod simple_char
+```
+
+Thread-safe FIFO:
+
+```sh
+insmod /modules/thread_safe_char.ko
+/bin/char_device_demo safe read 5 &
+/bin/char_device_demo safe write HELLO
+wait
+/bin/boundary_tests safe
+/bin/stress_tests stream safe 8 1024
+/bin/stress_tests mpmc 4 4 10000
+rmmod thread_safe_char
+```
+
+Lock-free SPSC FIFO:
+
+```sh
+insmod /modules/lock_free_char.ko
+/bin/char_device_demo lockfree read 5 &
+/bin/char_device_demo lockfree write HELLO
+wait
+/bin/boundary_tests lockfree
+/bin/stress_tests stream lockfree 8 1024
+rmmod lock_free_char
+```
+
+Exit the guest with:
+
+```sh
+poweroff -f
+```
+
+## Convenience launchers
+
+Linux / EC2:
+
+```bash
+chmod +x driver-lab.sh
+./driver-lab.sh image
+./driver-lab.sh test
+./driver-lab.sh shell
+```
+
+Windows PowerShell / Command Prompt with Docker Desktop:
+
+```powershell
+.\driver-lab.cmd image
+.\driver-lab.cmd test
+.\driver-lab.cmd shell
+```
+
+The launchers mount `docker/output/` so QEMU logs and generated artifacts persist on the host.
+
+# Native Linux workflow
+
+When matching headers for the running kernel are available, Docker/QEMU is optional.
+
+```bash
+make
+sudo insmod 01_simple_char/simple_char.ko
+./user/char_device_demo simple roundtrip HELLO
+sudo rmmod simple_char
+```
+
+Then repeat with the safe and lock-free modules.
+
+# Benchmarking
+
+SPSC comparison:
+
+```sh
+/bin/stress_tests stream safe 64 64
+/bin/stress_tests stream lockfree 64 64
+
+/bin/stress_tests stream safe 64 1024
+/bin/stress_tests stream lockfree 64 1024
+
+/bin/stress_tests stream safe 64 4096
+/bin/stress_tests stream lockfree 64 4096
+```
+
+Metrics reported include elapsed time, throughput, syscall counts, short I/O, context switches, byte counts, and corruption count.
+
+MPMC reliability for the mutex implementation:
+
+```sh
+/bin/stress_tests mpmc 1 1 100000
+/bin/stress_tests mpmc 2 2 100000
+/bin/stress_tests mpmc 4 4 100000
+```
+
+Pass criteria are correctness-based: exact byte counts, zero corruption, and zero unexpected errors. No test assumes the lock-free implementation must outperform the mutex implementation.
+
+# Repository structure
 
 ```text
 .
@@ -68,301 +204,13 @@ The reference builds an out-of-tree module inside Docker, packages the module an
 │   ├── init-test.sh
 │   ├── init-shell.sh
 │   ├── run.ps1
-│   ├── run.sh
 │   └── output/
+├── driver-lab.sh
 ├── driver-lab.cmd
 ├── Makefile
 └── README.md
 ```
 
-## Windows prerequisites
+# Important implementation note
 
-Docker Desktop must be installed and running in **Linux container mode**. The WSL 2 backend is the normal Windows setup.
-
-Verify from PowerShell:
-
-```powershell
-docker version
-docker run --rm hello-world
-```
-
-No Windows installation of GCC, Linux headers, QEMU, or `make` is required.
-
-## One-command automated test
-
-From PowerShell at the repository root:
-
-```powershell
-.\driver-lab.cmd test
-```
-
-The launcher:
-
-1. builds the Docker image;
-2. installs/uses an Ubuntu 24.04 generic kernel and matching headers inside the image;
-3. builds all three kernel modules through Kbuild;
-4. compiles the user program and tests as static Linux executables;
-5. creates a BusyBox initramfs;
-6. boots the matching kernel with `qemu-system-x86_64`;
-7. loads the three `.ko` modules;
-8. runs boundary and stress tests;
-9. scans kernel diagnostics;
-10. unloads the modules and powers off.
-
-A successful run ends with:
-
-```text
-DRIVER LAB RESULT: PASS
-Docker/QEMU test result: PASS
-```
-
-The serial log is saved as:
-
-```text
-docker/output/latest.log
-```
-
-## Build without booting QEMU
-
-```powershell
-.\driver-lab.cmd build
-```
-
-Generated artifacts are copied to:
-
-```text
-docker/output/build/
-├── kernel-version.txt
-├── modules/
-│   ├── simple_char.ko
-│   ├── thread_safe_char.ko
-│   └── lock_free_char.ko
-└── bin/
-    ├── char_device_demo
-    ├── boundary_tests
-    └── stress_tests
-```
-
-The `.ko` files are for the QEMU guest kernel, not the Windows/WSL host kernel.
-
-## Interactive learning mode
-
-The most useful mode while learning is:
-
-```powershell
-.\driver-lab.cmd shell
-```
-
-QEMU boots to a BusyBox shell. No module is loaded automatically, allowing the complete driver lifecycle to be practiced manually.
-
-### Simple character driver
-
-```sh
-uname -a
-ls /modules
-
-insmod /modules/simple_char.ko
-lsmod
-ls -l /dev/simple_char
-cat /proc/devices
-
-/bin/char_device_demo simple roundtrip HELLO
-/bin/boundary_tests simple
-
-dmesg | tail -30
-rmmod simple_char
-```
-
-Concepts visible in this stage:
-
-```text
-alloc_chrdev_region()
-       |
-       v
-major/minor device number
-       |
-       v
-cdev_init() + cdev_add()
-       |
-       v
-class_create() + device_create()
-       |
-       v
-/dev/simple_char
-       |
-       v
-file_operations -> open/read/write/release
-```
-
-### Thread-safe circular character driver
-
-```sh
-insmod /modules/thread_safe_char.ko
-
-/bin/char_device_demo safe read 5 &
-/bin/char_device_demo safe write HELLO
-wait
-
-/bin/boundary_tests safe
-/bin/stress_tests stream safe 8 1024
-/bin/stress_tests mpmc 4 4 10000
-
-rmmod thread_safe_char
-```
-
-The blocking experiment shows the reader sleeping on a wait queue until the writer deposits data.
-
-```text
-reader                         writer
-  |                              |
-read()                         write()
-  |                              |
-queue empty                      |
-  |                              |
-wait_event_interruptible()       |
-  |                              |
-  |                         mutex_lock()
-  |                         enqueue bytes
-  |                         mutex_unlock()
-  |                              |
-  |<--- wake_up_interruptible()--|
-  |
-consume bytes
-```
-
-### Lock-free SPSC circular character driver
-
-```sh
-insmod /modules/lock_free_char.ko
-
-/bin/char_device_demo lockfree read 5 &
-/bin/char_device_demo lockfree write HELLO
-wait
-
-/bin/boundary_tests lockfree
-/bin/stress_tests stream lockfree 8 1024
-
-rmmod lock_free_char
-```
-
-The queue synchronization model changes to ownership rather than a mutex:
-
-```text
-single reader                    single writer
-     |                                |
-owns read_index                 owns write_index
-     |                                |
-     `------- acquire/release --------'
-```
-
-`volatile` is not used as a synchronization mechanism. The published ring indices use kernel memory-ordering primitives so buffer accesses happen before/after index publication as required.
-
-## Automated tests
-
-### Boundary tests
-
-```sh
-/bin/boundary_tests all
-```
-
-Coverage includes:
-
-- zero-length read/write;
-- exact-capacity transfer;
-- oversized transfer;
-- EOF behavior for the simple device;
-- `EAGAIN` on empty/full non-blocking FIFO operations;
-- circular-buffer wrap-around and FIFO ordering;
-- `EBUSY` for a second reader or writer on the SPSC lock-free driver.
-
-### SPSC stream stress
-
-```sh
-/bin/stress_tests stream safe 8 1024
-/bin/stress_tests stream lockfree 8 1024
-```
-
-Pass criteria:
-
-- requested bytes written exactly;
-- requested bytes read exactly;
-- zero data mismatches;
-- zero unexpected errors;
-- 100% verified reliability.
-
-Metrics printed include elapsed time, MiB/s, syscall counts, short reads/writes, and context switches.
-
-QEMU/TCG timing should be treated as a controlled comparative experiment, not native-hardware throughput.
-
-### MPMC reliability
-
-```sh
-/bin/stress_tests mpmc 4 4 10000
-```
-
-This is intended for `thread_safe_char`. Multiple producers and consumers concurrently exercise the shared mutex-protected FIFO.
-
-### Unsynchronized race observation
-
-```sh
-/bin/stress_tests simple-race 4 10
-```
-
-`simple_char` intentionally has no synchronization. The test observes concurrent overlapping writers rather than claiming thread safety.
-
-## Driver trade-offs
-
-| Implementation | Concurrency | Main advantage | Main cost / restriction |
-|---|---|---|---|
-| `simple_char` | Unsupported | Minimal character-driver plumbing | Shared state races under concurrent access |
-| `thread_safe_char` | MPMC | Straightforward correctness and blocking semantics | Mutex serialization and contention |
-| `lock_free_char` | SPSC | Producer and consumer do not serialize on one queue mutex | Exactly one reader and one writer; memory ordering is harder to reason about |
-
-The lock-free design should not be described merely as “faster.” Its principal trade-off is reduced synchronization contention in exchange for a much narrower concurrency contract and more subtle correctness requirements.
-
-## Useful launcher commands
-
-```powershell
-.\driver-lab.cmd image   # build only the Docker image
-.\driver-lab.cmd build   # compile modules and static tools
-.\driver-lab.cmd test    # full automated QEMU run
-.\driver-lab.cmd shell   # interactive QEMU learning shell
-.\driver-lab.cmd clean   # clear docker/output artifacts
-```
-
-PowerShell can also invoke the launcher directly:
-
-```powershell
-.\docker\run.ps1 test
-```
-
-Git Bash/WSL users can use:
-
-```sh
-./docker/run.sh test
-```
-
-## Kernel module build model
-
-Each driver retains the standard external-module Kbuild pattern:
-
-```make
-obj-m += simple_char.o
-
-all:
-	$(MAKE) -C "$(KDIR)" M="$(CURDIR)" modules
-```
-
-The Docker harness sets `KDIR` to the headers belonging to the same kernel image that QEMU later boots. This avoids the common module-version mismatch caused by building against one kernel and loading into another.
-
-Official Kbuild documentation:
-
-- https://docs.kernel.org/next/kbuild/modules.html
-
-## Reference project
-
-The Docker/QEMU structure is based on the testing pattern demonstrated by:
-
-- https://github.com/czhao-dev/linux-device-drivers/tree/main/linux-character-device-driver
-
-The source code in the three driver folders remains the existing project implementation; only the surrounding Windows Docker/QEMU workflow is added.
+All driver callbacks use module-specific names such as `simple_char_open()`. This avoids collisions with existing kernel symbols such as Linux's own `simple_open()` declared in `<linux/fs.h>`.

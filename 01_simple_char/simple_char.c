@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
-/* Basic character device using an explicit major/minor device number. */
+/* Minimal unsynchronized character driver used to learn Linux char-device plumbing. */
 
 #include <linux/cdev.h>
 #include <linux/device.h>
@@ -8,132 +8,138 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/uaccess.h>
-#include <linux/version.h>
 
 #include "simple_char.h"
 
-static dev_t simple_dev_number;
-static struct cdev simple_cdev;
-static struct class *simple_class;
-static struct device *simple_device;
+struct simple_char_device {
+	dev_t device_number;
+	struct cdev cdev;
+	struct class *device_class;
+	char buffer[SIMPLE_CHAR_CAPACITY];
+	size_t data_size;
+};
 
-static char simple_buffer[SIMPLE_CHAR_CAPACITY];
-static size_t simple_data_size;
+static struct simple_char_device simple_device;
 
-static int simple_open(struct inode *inode, struct file *file)
+static int simple_char_open(struct inode *inode, struct file *file)
 {
+	file->private_data = &simple_device;
 	pr_debug("simple_char: open\n");
 	return 0;
 }
 
-static int simple_release(struct inode *inode, struct file *file)
+static int simple_char_release(struct inode *inode, struct file *file)
 {
 	pr_debug("simple_char: release\n");
 	return 0;
 }
 
-static ssize_t simple_read(struct file *file, char __user *user_buffer,
-			   size_t count, loff_t *offset)
+static ssize_t simple_char_read(struct file *file, char __user *user_buffer,
+				size_t requested, loff_t *offset)
 {
-	size_t bytes_to_read;
+	struct simple_char_device *device = file->private_data;
+	size_t available;
+	size_t bytes_to_copy;
 
-	if (*offset >= simple_data_size)
+	if (requested == 0)
 		return 0;
 
-	bytes_to_read = min(count, simple_data_size - (size_t)*offset);
+	if (*offset >= device->data_size)
+		return 0;
 
-	if (copy_to_user(user_buffer, simple_buffer + *offset, bytes_to_read))
+	available = device->data_size - (size_t)*offset;
+	bytes_to_copy = min(requested, available);
+
+	if (copy_to_user(user_buffer, device->buffer + *offset, bytes_to_copy))
 		return -EFAULT;
 
-	*offset += bytes_to_read;
-	return bytes_to_read;
+	*offset += bytes_to_copy;
+	return bytes_to_copy;
 }
 
-static ssize_t simple_write(struct file *file, const char __user *user_buffer,
-			    size_t count, loff_t *offset)
+static ssize_t simple_char_write(struct file *file,
+				 const char __user *user_buffer,
+				 size_t requested, loff_t *offset)
 {
-	size_t bytes_to_write;
-	size_t end_offset;
+	struct simple_char_device *device = file->private_data;
+	size_t available;
+	size_t bytes_to_copy;
+
+	if (requested == 0)
+		return 0;
 
 	if (*offset >= SIMPLE_CHAR_CAPACITY)
 		return -ENOSPC;
 
-	if (*offset == 0)
-		simple_data_size = 0;
+	available = SIMPLE_CHAR_CAPACITY - (size_t)*offset;
+	bytes_to_copy = min(requested, available);
 
-	bytes_to_write = min(count, SIMPLE_CHAR_CAPACITY - (size_t)*offset);
-
-	if (copy_from_user(simple_buffer + *offset, user_buffer, bytes_to_write))
+	if (copy_from_user(device->buffer + *offset, user_buffer, bytes_to_copy))
 		return -EFAULT;
 
-	*offset += bytes_to_write;
-	end_offset = (size_t)*offset;
-	if (end_offset > simple_data_size)
-		simple_data_size = end_offset;
+	*offset += bytes_to_copy;
+	if ((size_t)*offset > device->data_size)
+		device->data_size = (size_t)*offset;
 
-	return bytes_to_write;
+	return bytes_to_copy;
 }
 
-static const struct file_operations simple_fops = {
+static const struct file_operations simple_char_operations = {
 	.owner = THIS_MODULE,
-	.open = simple_open,
-	.release = simple_release,
-	.read = simple_read,
-	.write = simple_write,
+	.open = simple_char_open,
+	.release = simple_char_release,
+	.read = simple_char_read,
+	.write = simple_char_write,
 };
 
 static int __init simple_char_init(void)
 {
 	int result;
 
-	result = alloc_chrdev_region(&simple_dev_number, SIMPLE_CHAR_MINOR,
-				     SIMPLE_CHAR_COUNT, SIMPLE_CHAR_DEVICE_NAME);
+	result = alloc_chrdev_region(&simple_device.device_number, 0, 1,
+				     SIMPLE_CHAR_DEVICE_NAME);
 	if (result)
 		return result;
 
-	cdev_init(&simple_cdev, &simple_fops);
-	simple_cdev.owner = THIS_MODULE;
+	cdev_init(&simple_device.cdev, &simple_char_operations);
+	simple_device.cdev.owner = THIS_MODULE;
 
-	result = cdev_add(&simple_cdev, simple_dev_number, SIMPLE_CHAR_COUNT);
+	result = cdev_add(&simple_device.cdev, simple_device.device_number, 1);
 	if (result)
 		goto unregister_number;
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
-	simple_class = class_create(SIMPLE_CHAR_CLASS_NAME);
-#else
-	simple_class = class_create(THIS_MODULE, SIMPLE_CHAR_CLASS_NAME);
-#endif
-	if (IS_ERR(simple_class)) {
-		result = PTR_ERR(simple_class);
+	simple_device.device_class = class_create(SIMPLE_CHAR_CLASS_NAME);
+	if (IS_ERR(simple_device.device_class)) {
+		result = PTR_ERR(simple_device.device_class);
 		goto delete_cdev;
 	}
 
-	simple_device = device_create(simple_class, NULL, simple_dev_number,
-				      NULL, SIMPLE_CHAR_DEVICE_NAME);
-	if (IS_ERR(simple_device)) {
-		result = PTR_ERR(simple_device);
+	if (IS_ERR(device_create(simple_device.device_class, NULL,
+				 simple_device.device_number, NULL,
+				 SIMPLE_CHAR_DEVICE_NAME))) {
+		result = -ENODEV;
 		goto destroy_class;
 	}
 
-	pr_info("simple_char: loaded major=%d minor=%d\n",
-		MAJOR(simple_dev_number), MINOR(simple_dev_number));
+	pr_info("simple_char: loaded major=%u minor=%u\n",
+		MAJOR(simple_device.device_number), MINOR(simple_device.device_number));
 	return 0;
 
 destroy_class:
-	class_destroy(simple_class);
+	class_destroy(simple_device.device_class);
 delete_cdev:
-	cdev_del(&simple_cdev);
+	cdev_del(&simple_device.cdev);
 unregister_number:
-	unregister_chrdev_region(simple_dev_number, SIMPLE_CHAR_COUNT);
+	unregister_chrdev_region(simple_device.device_number, 1);
 	return result;
 }
 
 static void __exit simple_char_exit(void)
 {
-	device_destroy(simple_class, simple_dev_number);
-	class_destroy(simple_class);
-	cdev_del(&simple_cdev);
-	unregister_chrdev_region(simple_dev_number, SIMPLE_CHAR_COUNT);
+	device_destroy(simple_device.device_class, simple_device.device_number);
+	class_destroy(simple_device.device_class);
+	cdev_del(&simple_device.cdev);
+	unregister_chrdev_region(simple_device.device_number, 1);
 	pr_info("simple_char: unloaded\n");
 }
 
@@ -141,5 +147,5 @@ module_init(simple_char_init);
 module_exit(simple_char_exit);
 
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Linux character device project");
-MODULE_DESCRIPTION("Basic major/minor character device");
+MODULE_AUTHOR("Linux Character Driver Lab");
+MODULE_DESCRIPTION("Minimal unsynchronized Linux character device");

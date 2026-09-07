@@ -1,7 +1,6 @@
-SHELL := /bin/bash
 KDIR ?= /lib/modules/$(shell uname -r)/build
 
-.PHONY: all modules user tests clean docker-build docker-test docker-shell
+.PHONY: all modules user tests clean docker-image docker-build docker-test docker-shell
 
 all: modules user tests
 
@@ -17,17 +16,20 @@ tests:
 	$(MAKE) -C tests
 
 clean:
-	$(MAKE) -C 01_simple_char clean KDIR="$(KDIR)"
-	$(MAKE) -C 02_thread_safe_char clean KDIR="$(KDIR)"
-	$(MAKE) -C 03_lock_free_char clean KDIR="$(KDIR)"
+	$(MAKE) -C 01_simple_char clean KDIR="$(KDIR)" || true
+	$(MAKE) -C 02_thread_safe_char clean KDIR="$(KDIR)" || true
+	$(MAKE) -C 03_lock_free_char clean KDIR="$(KDIR)" || true
 	$(MAKE) -C user clean
 	$(MAKE) -C tests clean
 
+docker-image:
+	docker build -t char-driver-lab -f docker/Dockerfile .
+
 docker-build:
-	./docker/run.sh build
+	./driver-lab.sh build
 
 docker-test:
-	./docker/run.sh test
+	./driver-lab.sh test
 
 docker-shell:
-	./docker/run.sh shell
+	./driver-lab.sh shell

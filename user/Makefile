@@ -1,11 +1,17 @@
-CC ?= gcc
+CC ?= cc
 CFLAGS ?= -Wall -Wextra -Wpedantic -O2
-TARGET := char_device_demo
+LDFLAGS ?=
+STATIC ?= 0
 
-all: $(TARGET)
+ifeq ($(STATIC),1)
+LDFLAGS += -static
+endif
 
-$(TARGET): main.c
-	$(CC) $(CFLAGS) -o $@ $<
+.PHONY: all clean
+all: char_device_demo
+
+char_device_demo: main.c
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
 clean:
-	rm -f $(TARGET)
+	rm -f char_device_demo

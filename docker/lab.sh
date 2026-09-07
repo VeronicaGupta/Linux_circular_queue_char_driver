@@ -1,170 +1,146 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT=/src
+ROOT=/workspace
 OUTPUT="$ROOT/docker/output"
-MODE="${1:-test}"
+BUILD="$OUTPUT/build"
+ROOTFS="$BUILD/rootfs"
+KVER="$(ls -1 /lib/modules | sort -V | tail -n 1)"
+KDIR="/lib/modules/$KVER/build"
+KERNEL_IMAGE="/boot/vmlinuz-$KVER"
 
-kernel_version()
-{
-    ls -1 /lib/modules | sort -V | tail -n 1
+log() { printf '== %s ==\n' "$*"; }
+
+build_all() {
+    log "Target guest kernel"
+    echo "KVER=$KVER"
+    echo "KDIR=$KDIR"
+
+    rm -rf "$BUILD"
+    mkdir -p "$BUILD/modules" "$BUILD/bin" "$ROOTFS"
+
+    make -C "$ROOT/01_simple_char" clean KDIR="$KDIR" >/dev/null || true
+    make -C "$ROOT/02_thread_safe_char" clean KDIR="$KDIR" >/dev/null || true
+    make -C "$ROOT/03_lock_free_char" clean KDIR="$KDIR" >/dev/null || true
+
+    make -C "$ROOT/01_simple_char" KDIR="$KDIR"
+    make -C "$ROOT/02_thread_safe_char" KDIR="$KDIR"
+    make -C "$ROOT/03_lock_free_char" KDIR="$KDIR"
+    make -C "$ROOT/user" clean all STATIC=1
+    make -C "$ROOT/tests" clean all STATIC=1
+
+    cp "$ROOT/01_simple_char/simple_char.ko" "$BUILD/modules/"
+    cp "$ROOT/02_thread_safe_char/thread_safe_char.ko" "$BUILD/modules/"
+    cp "$ROOT/03_lock_free_char/lock_free_char.ko" "$BUILD/modules/"
+    cp "$ROOT/user/char_device_demo" "$BUILD/bin/"
+    cp "$ROOT/tests/boundary_tests" "$BUILD/bin/"
+    cp "$ROOT/tests/stress_tests" "$BUILD/bin/"
+    printf '%s\n' "$KVER" > "$BUILD/kernel-version.txt"
+
+    log "Build complete"
+    find "$BUILD/modules" "$BUILD/bin" -maxdepth 1 -type f -printf '%p\n'
 }
 
-clean_build_artifacts()
-{
-    local kver
-    kver="$(kernel_version)"
-    local kdir="/lib/modules/$kver/build"
+make_initramfs() {
+    local mode="$1"
+    local init_script
+    local archive="$OUTPUT/initramfs-${mode}.cpio.gz"
 
-    for module_dir in 01_simple_char 02_thread_safe_char 03_lock_free_char; do
-        make -C "$ROOT/$module_dir" clean KDIR="$kdir" >/dev/null 2>&1 || true
-    done
-
-    rm -f "$ROOT/user/char_device_demo" \
-          "$ROOT/tests/boundary_tests" \
-          "$ROOT/tests/stress_tests"
-    rm -rf "$OUTPUT/build" "$OUTPUT/initramfs.cpio.gz" "$OUTPUT/latest.log"
-}
-
-build_all()
-{
-    local kver kdir
-    kver="$(kernel_version)"
-    kdir="/lib/modules/$kver/build"
-
-    if [[ ! -f "$kdir/Makefile" ]]; then
-        echo "ERROR: installed kernel build tree not found: $kdir" >&2
-        exit 2
+    if [[ "$mode" == "test" ]]; then
+        init_script="$ROOT/docker/init-test.sh"
+    else
+        init_script="$ROOT/docker/init-shell.sh"
     fi
 
-    echo "== Target guest kernel =="
-    echo "KVER=$kver"
-    echo "KDIR=$kdir"
+    rm -rf "$ROOTFS"
+    mkdir -p "$ROOTFS"/{bin,dev,proc,sys,tmp,modules}
+    cp /bin/busybox "$ROOTFS/bin/busybox"
+    cp "$BUILD/bin/char_device_demo" "$ROOTFS/bin/"
+    cp "$BUILD/bin/boundary_tests" "$ROOTFS/bin/"
+    cp "$BUILD/bin/stress_tests" "$ROOTFS/bin/"
+    cp "$BUILD/modules/"*.ko "$ROOTFS/modules/"
+    cp "$init_script" "$ROOTFS/init"
+    chmod +x "$ROOTFS/init" "$ROOTFS/bin/"*
 
-    make -C "$ROOT/01_simple_char" KDIR="$kdir"
-    make -C "$ROOT/02_thread_safe_char" KDIR="$kdir"
-    make -C "$ROOT/03_lock_free_char" KDIR="$kdir"
-
-    # Static binaries are required because the QEMU initramfs contains no glibc.
-    gcc -static -Wall -Wextra -Wpedantic -O2 \
-        -o "$ROOT/user/char_device_demo" "$ROOT/user/main.c"
-
-    gcc -static -Wall -Wextra -Wpedantic -O2 -std=c11 \
-        -o "$ROOT/tests/boundary_tests" "$ROOT/tests/boundary_tests.c" -pthread
-
-    gcc -static -Wall -Wextra -Wpedantic -O2 -std=c11 \
-        -o "$ROOT/tests/stress_tests" "$ROOT/tests/stress_tests.c" -pthread
-
-    mkdir -p "$OUTPUT/build/modules" "$OUTPUT/build/bin"
-    cp "$ROOT/01_simple_char/simple_char.ko" "$OUTPUT/build/modules/"
-    cp "$ROOT/02_thread_safe_char/thread_safe_char.ko" "$OUTPUT/build/modules/"
-    cp "$ROOT/03_lock_free_char/lock_free_char.ko" "$OUTPUT/build/modules/"
-    cp "$ROOT/user/char_device_demo" "$OUTPUT/build/bin/"
-    cp "$ROOT/tests/boundary_tests" "$OUTPUT/build/bin/"
-    cp "$ROOT/tests/stress_tests" "$OUTPUT/build/bin/"
-    printf '%s\n' "$kver" > "$OUTPUT/build/kernel-version.txt"
-
-    echo
-    echo "Build artifacts: $OUTPUT/build"
+    (cd "$ROOTFS" && find . -print0 | cpio --null -ov --format=newc 2>/dev/null | gzip -9) > "$archive"
+    echo "$archive"
 }
 
-make_initramfs()
-{
-    local init_script="$1"
-    local initroot=/tmp/char-driver-initramfs
+run_qemu() {
+    local mode="$1"
+    local initramfs
+    local log_file="$OUTPUT/latest.log"
 
-    rm -rf "$initroot"
-    mkdir -p "$initroot/bin" "$initroot/modules" "$initroot/proc" \
-             "$initroot/sys" "$initroot/dev" "$initroot/tmp"
+    initramfs="$(make_initramfs "$mode")"
+    log "Booting QEMU ($mode)"
 
-    cp /usr/bin/busybox "$initroot/bin/busybox"
-    cp "$ROOT/docker/$init_script" "$initroot/init"
-    chmod +x "$initroot/init"
+    if [[ "$mode" == "test" ]]; then
+        set +e
+        qemu-system-x86_64 \
+            -machine accel=tcg \
+            -cpu max \
+            -m 768M \
+            -smp 2 \
+            -kernel "$KERNEL_IMAGE" \
+            -initrd "$initramfs" \
+            -append "console=ttyS0 rdinit=/init panic=-1" \
+            -nographic -no-reboot 2>&1 | tee "$log_file"
+        qemu_status=${PIPESTATUS[0]}
+        set -e
 
-    cp "$OUTPUT/build/modules/"*.ko "$initroot/modules/"
-    cp "$OUTPUT/build/bin/char_device_demo" "$initroot/bin/"
-    cp "$OUTPUT/build/bin/boundary_tests" "$initroot/bin/"
-    cp "$OUTPUT/build/bin/stress_tests" "$initroot/bin/"
+        if grep -q "DRIVER LAB RESULT: PASS" "$log_file"; then
+            echo "Docker/QEMU test result: PASS"
+            exit 0
+        fi
 
-    (
-        cd "$initroot"
-        find . -print0 | cpio --null -o --format=newc 2>/dev/null | gzip -9
-    ) > "$OUTPUT/initramfs.cpio.gz"
-}
-
-qemu_command()
-{
-    local kver
-    kver="$(cat "$OUTPUT/build/kernel-version.txt")"
-
-    local runner=()
-    if [[ "${QEMU_TIMEOUT_SECONDS:-0}" != "0" ]]; then
-        runner=(timeout "${QEMU_TIMEOUT_SECONDS}s")
+        echo "Docker/QEMU test result: FAIL"
+        exit "${qemu_status:-1}"
+    else
+        exec qemu-system-x86_64 \
+            -machine accel=tcg \
+            -cpu max \
+            -m 768M \
+            -smp 2 \
+            -kernel "$KERNEL_IMAGE" \
+            -initrd "$initramfs" \
+            -append "console=ttyS0 rdinit=/init panic=-1" \
+            -nographic -no-reboot
     fi
-
-    "${runner[@]}" qemu-system-x86_64 \
-        -machine q35,accel=tcg \
-        -cpu max \
-        -smp 2 \
-        -m 768M \
-        -nodefaults \
-        -no-reboot \
-        -kernel "/boot/vmlinuz-$kver" \
-        -initrd "$OUTPUT/initramfs.cpio.gz" \
-        -append "console=ttyS0 rdinit=/init panic=-1" \
-        -serial stdio \
-        -monitor none \
-        -display none
 }
 
-run_tests()
-{
-    build_all
-    make_initramfs init-test.sh
-
-    echo
-    echo "== Boot QEMU and run tests =="
-    set +e
-    QEMU_TIMEOUT_SECONDS=240 qemu_command 2>&1 | tee "$OUTPUT/latest.log"
-    local qemu_status=${PIPESTATUS[0]}
-    set -e
-
-    if grep -q "DRIVER LAB RESULT: PASS" "$OUTPUT/latest.log"; then
-        echo
-        echo "Docker/QEMU test result: PASS"
-        exit 0
-    fi
-
-    echo
-    echo "Docker/QEMU test result: FAIL (QEMU status=$qemu_status)" >&2
-    exit 1
+clean_all() {
+    rm -rf "$OUTPUT/build" "$OUTPUT"/*.cpio.gz "$OUTPUT"/*.log
+    make -C "$ROOT/01_simple_char" clean KDIR="$KDIR" || true
+    make -C "$ROOT/02_thread_safe_char" clean KDIR="$KDIR" || true
+    make -C "$ROOT/03_lock_free_char" clean KDIR="$KDIR" || true
+    make -C "$ROOT/user" clean || true
+    make -C "$ROOT/tests" clean || true
 }
 
-run_shell()
-{
-    build_all
-    make_initramfs init-shell.sh
-    echo
-    echo "== Boot interactive QEMU guest =="
-    qemu_command
-}
-
-case "$MODE" in
+case "${1:-help}" in
     build)
         build_all
         ;;
     test)
-        run_tests
+        build_all
+        run_qemu test
         ;;
-    shell|interactive)
-        run_shell
+    shell)
+        build_all
+        run_qemu shell
         ;;
     clean)
-        clean_build_artifacts
-        echo "Clean complete."
+        clean_all
         ;;
-    *)
-        echo "Usage: $0 {build|test|shell|clean}" >&2
-        exit 2
+    help|*)
+        cat <<'HELP'
+Linux Character Driver Docker/QEMU Lab
+
+Commands:
+  build   Compile all three .ko modules and static user/test binaries
+  test    Build, boot QEMU, load drivers, and run automated tests
+  shell   Build and boot an interactive QEMU Linux shell
+  clean   Remove generated build/test artifacts
+HELP
         ;;
 esac

@@ -1,7 +1,5 @@
 #!/bin/busybox sh
 
-# Interactive PID 1 for manual driver practice inside the QEMU guest.
-
 /bin/busybox --install -s /bin
 mkdir -p /proc /sys /dev /tmp
 mount -t proc proc /proc
@@ -15,19 +13,21 @@ cat <<'BANNER'
 
 Modules are intentionally NOT loaded.
 
-Suggested practice:
-
+Start with:
   uname -a
   ls /modules
 
+Simple driver:
   insmod /modules/simple_char.ko
   lsmod
   ls -l /dev/simple_char
   cat /proc/devices
   /bin/char_device_demo simple roundtrip HELLO
+  /bin/boundary_tests simple
   dmesg | tail -30
   rmmod simple_char
 
+Thread-safe FIFO:
   insmod /modules/thread_safe_char.ko
   /bin/char_device_demo safe read 5 &
   /bin/char_device_demo safe write HELLO
@@ -37,6 +37,7 @@ Suggested practice:
   /bin/stress_tests mpmc 4 4 10000
   rmmod thread_safe_char
 
+Lock-free SPSC FIFO:
   insmod /modules/lock_free_char.ko
   /bin/char_device_demo lockfree read 5 &
   /bin/char_device_demo lockfree write HELLO
@@ -45,9 +46,8 @@ Suggested practice:
   /bin/stress_tests stream lockfree 8 1024
   rmmod lock_free_char
 
-  dmesg | tail -80
+Exit:
   poweroff -f
-
 BANNER
 
 exec /bin/sh

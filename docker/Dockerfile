@@ -1,20 +1,24 @@
-FROM --platform=linux/amd64 ubuntu:24.04
+FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
-    linux-headers-generic \
     linux-image-generic \
+    linux-headers-generic \
     kmod \
     qemu-system-x86 \
-    qemu-utils \
     busybox-static \
     cpio \
     gzip \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /src
+WORKDIR /workspace
+COPY . /workspace
+RUN chmod +x /workspace/docker/lab.sh \
+    /workspace/docker/init-test.sh \
+    /workspace/docker/init-shell.sh
 
-CMD ["/bin/bash"]
+ENTRYPOINT ["/workspace/docker/lab.sh"]
+CMD ["help"]
