@@ -1,0 +1,58 @@
+~ # /bin/char_device_demo lockfree write HELLO
+open for write: No such file or directory
+~ # insmod /modules/lock_free_char.ko
+[   35.360838] lock_free_char: loading out-of-tree module taints kernel.
+[   35.362241] lock_free_char: module verification failed: signature and/or required key missing - tainting kernel
+[   35.376298] lock_free_char: loaded usable_capacity=4096 SPSC
+~ # /bin/char_device_demo lockfree read 5 &  // Process Created
+~ # /bin/boundary_tests lockfree
+
+[lock_free_char boundary tests]
+  allocate test buffers                                  PASS
+  drain queue before test                                FAIL
+  open O_RDWR | O_NONBLOCK                               FAIL
+  Result: 1 passed, 2 failed
+~ #  /bin/stress_tests stream lockfree 8 1024
+
+[lockfree SPSC stream benchmark]
+  Transfer: 8 MiB, chunk: 1024 bytes
+  Bytes written:        0
+  Bytes read:           0
+  Data mismatches:      0
+  write() calls:        0
+  read() calls:         0
+  Short writes:         0
+  Short reads:          0
+  Elapsed:              0.019 s
+  Throughput:           0.00 MiB/s
+  Voluntary switches:   1
+  Involuntary switches: 2
+  Result: FAIL
+~ # ps | grep char_device_demo
+   94 0        /bin/char_device_demo lockfree read 5 // Process still waiting
+  100 0        grep char_device_demo
+~ # /bin/char_device_demo lockfree write HELLO // Process Done
+device=/dev/lock_free_char read=5 data="HELLO"
+device=/dev/lock_free_char written=5 data="HELLO"
+~ # ps | grep char_device_demo // No Process in queue
+  103 0        grep char_device_demo  
+~ # /bin/boundary_tests lockfree
+~ # /bin/boundary_tests lockfree // Test Passes
+
+[lock_free_char boundary tests]
+  allocate test buffers                                  PASS
+  drain queue before test                                PASS
+  open O_RDWR | O_NONBLOCK                               PASS
+  zero-length read returns 0                             PASS
+  zero-length write returns 0                            PASS
+  empty nonblocking read returns EAGAIN                  PASS
+  exact-capacity write fills FIFO                        PASS
+  full nonblocking write returns EAGAIN                  PASS
+  full FIFO drains in order                              PASS
+  wrap test first write                                  PASS
+  wrap test partial read                                 PASS
+  wrap test second write crosses ring end                PASS
+  wrap-around preserves FIFO ordering                    PASS
+  second reader rejected while O_RDWR owner is open      PASS
+  second writer rejected while O_RDWR owner is open      PASS
+  Result: 15 passed, 0 failed
