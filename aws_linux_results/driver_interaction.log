@@ -1,0 +1,36 @@
+QEMU Shell
+
+simple
+
+~ # /bin/char_device_demo simple roundtrip HELLO
+open for write: No such file or directory
+~ # insmod /modules/simple_char.ko
+[  265.677852] simple_char: loaded major=241 minor=0
+~ # /bin/char_device_demo simple roundtrip HELLO
+device=/dev/simple_char written=5 data="HELLO"
+device=/dev/simple_char read=5 data="HELLO"
+~ # rmmod simple_char
+[  288.861965] simple_char: unloaded
+
+
+safe
+
+~ # /bin/char_device_demo safe write HELLO
+open for write: No such file or directory
+~ # insmod /modules/thread_safe_char.ko
+[  449.917696] thread_safe_char: loaded capacity=4096
+~ # /bin/char_device_demo safe write HELLO
+device=/dev/thread_safe_char written=5 data="HELLO"
+
+lockfree
+
+~ # /bin/char_device_demo lockfree write HELLO
+open for write: No such file or directory
+~ # insmod /modules/lock_free_char.ko
+[  328.987825] lock_free_char: loaded usable_capacity=4096 SPSC
+~ # /bin/char_device_demo lockfree read 5 &
+~ # /bin/char_device_demo lockfree write HELLO
+device=/dev/lock_free_char written=5 data="HELLO"
+device=/dev/lock_free_char read=5 data="HELLO"
+~ # rmmod lock_free_char
+[  356.685947] lock_free_char: unloaded

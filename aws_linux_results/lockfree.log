@@ -1,0 +1,35 @@
+[lock_free_char boundary tests]
+  allocate test buffers                                  PASS
+  drain queue before test                                PASS
+  open O_RDWR | O_NONBLOCK                               PASS
+  zero-length read returns 0                             PASS
+  zero-length write returns 0                            PASS
+  empty nonblocking read returns EAGAIN                  PASS
+  exact-capacity write fills FIFO                        PASS
+  full nonblocking write returns EAGAIN                  PASS
+  full FIFO drains in order                              PASS
+  wrap test first write                                  PASS
+  wrap test partial read                                 PASS
+  wrap test second write crosses ring end                PASS
+  wrap-around preserves FIFO ordering                    PASS
+  second reader rejected while O_RDWR owner is open      PASS
+  second writer rejected while O_RDWR owner is open      PASS
+  Result: 15 passed, 0 failed
+~ # /bin/busybox killall char_device_demo
+killall: char_device_demo: no process killed
+~ # /bin/stress_tests stream lockfree 8 1024
+
+[lockfree SPSC stream benchmark]
+  Transfer: 8 MiB, chunk: 1024 bytes
+  Bytes written:        8388608
+  Bytes read:           8388608
+  Data mismatches:      0
+  write() calls:        8192
+  read() calls:         8192
+  Short writes:         0
+  Short reads:          0
+  Elapsed:              0.196 s
+  Throughput:           40.81 MiB/s
+  Voluntary switches:   185
+  Involuntary switches: 1
+  Result: PASS
