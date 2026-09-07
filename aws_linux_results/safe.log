@@ -1,0 +1,40 @@
+[thread_safe_char boundary tests]
+  allocate test buffers                                  PASS
+  drain queue before test                                PASS
+  open O_RDWR | O_NONBLOCK                               PASS
+  zero-length read returns 0                             PASS
+  zero-length write returns 0                            PASS
+  empty nonblocking read returns EAGAIN                  PASS
+  exact-capacity write fills FIFO                        PASS
+  full nonblocking write returns EAGAIN                  PASS
+  full FIFO drains in order                              PASS
+  wrap test first write                                  PASS
+  wrap test partial read                                 PASS
+  wrap test second write crosses ring end                PASS
+  wrap-around preserves FIFO ordering                    PASS
+  Result: 13 passed, 0 failed
+~ # /bin/stress_tests stream safe 8 1024
+
+[safe SPSC stream benchmark]
+  Transfer: 8 MiB, chunk: 1024 bytes
+  Bytes written:        8388608
+  Bytes read:           8388608
+  Data mismatches:      0
+  write() calls:        8192
+  read() calls:         8192
+  Short writes:         0
+  Short reads:          0
+  Elapsed:              0.224 s
+  Throughput:           35.73 MiB/s
+  Voluntary switches:   140
+  Involuntary switches: 0
+  Result: PASS
+~ # /bin/stress_tests mpmc 4 4 10000
+
+[thread_safe_char MPMC reliability]
+  Producers: 4, consumers: 4, bytes/producer: 10000
+  Expected bytes:       40000
+  Consumed bytes:       40000
+  Elapsed:              0.221 s
+  Aggregate rate:       181296 bytes/s
+  Result: PASS
